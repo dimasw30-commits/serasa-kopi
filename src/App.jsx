@@ -370,11 +370,6 @@ const SerasaApp = () => {
       notify("Gagal menyimpan", "error");
     }
   };
-
-  const handleShareGaji = () => {
-    if (!selectedBarista || stats.net === 0) return notify("Data kosong", "error");
-
-    const monthStr = viewDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
 const handleDownloadSlip = async () => {
   const element = document.getElementById("slipGaji");
 
@@ -394,6 +389,11 @@ const handleDownloadSlip = async () => {
 
   notify("Slip berhasil diunduh sebagai gambar");
 };
+  const handleShareGaji = () => {
+    if (!selectedBarista || stats.net === 0) return notify("Data kosong", "error");
+
+    const monthStr = viewDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+
   const message =
   `☕ *SERASA KOPI INDONESIA*\n` +
   `📄 *SLIP GAJI BULANAN*\n` +
