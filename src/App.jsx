@@ -701,7 +701,9 @@ if (!branch) return (
                       </div>
                       <div className="text-right">
                          <p className="text-[10px] font-black uppercase tracking-[0.5em] opacity-40 mb-1 italic">Total Terima</p>
-                         <p className="text-6xl font-black text-emerald-400 italic">Rp {stats.net.toLocaleString()}</p>
+                         <p className="text-6xl font-black text-emerald-400 italic">
+  Rp {(stats.kehadiran - stats.potongan).toLocaleString()}
+</p>
                       </div>
                    </div>
 
