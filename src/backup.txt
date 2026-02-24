@@ -1,0 +1,723 @@
+import React, { useState, useEffect, useMemo, createContext, useContext, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, doc, setDoc, collection, 
+  query, onSnapshot, where, serverTimestamp, 
+  orderBy 
+} from 'firebase/firestore';
+import { 
+  getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  Settings, ChevronLeft, ChevronRight, X, Trash2, 
+  CheckCircle, AlertCircle, Coffee, Plus, TrendingUp, 
+  Zap, Layers, ChevronDown, Wallet, LogOut, 
+  BarChart3, Clock, Loader2, Save, WifiOff, Info, UserPlus
+} from 'lucide-react';
+
+/* ================================================================
+  1. CONFIG & SYSTEM CONSTANTS
+  ================================================================
+*/
+const firebaseConfig = {
+  apiKey: "AIzaSyAoCy8CgjNSnpI3bVbcLJBU6pX61ILUB2g",
+  authDomain: "penjualansk.firebaseapp.com",
+  projectId: "penjualansk",
+  storageBucket: "penjualansk.firebasestorage.app",
+  messagingSenderId: "422208396983",
+  appId: "1:422208396983:web:0da873fb88eb2c16e43732",
+  measurementId: "G-XZ1GLP2S60"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'serasa-kopi-ultra-v4';
+
+const THEME_MAP = {
+  blue: { bg: "bg-blue-50", text: "text-blue-600", icon: "bg-blue-100", border: "border-blue-100" },
+  emerald: { bg: "bg-emerald-50", text: "text-emerald-600", icon: "bg-emerald-100", border: "border-emerald-100" },
+  rose: { bg: "bg-rose-50", text: "text-rose-600", icon: "bg-rose-100", border: "border-rose-100" },
+  slate: { bg: "bg-slate-50", text: "text-slate-600", icon: "bg-slate-100", border: "border-slate-100" }
+};
+
+/* ================================================================
+  2. PAYROLL CORE ENGINE
+  ================================================================
+*/
+const PayrollEngine = {
+  getWeekId: (dateStr) => {
+    const d = new Date(dateStr);
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1); 
+    const mon = new Date(d.setDate(diff));
+    return mon.toISOString().split('T')[0];
+  },
+
+  calculate: (entries, config) => {
+    const res = {
+      komisiCup: 0, bonusHarian: 0, bonusMingguan: 0,
+      kasbon: 0, minus: 0, expired: 0,
+      totalCup: 0, totalNonSks: 0, hariKerja: entries.length,
+      weeklyCups: {}
+    };
+
+    if (!config) return { ...res, weeklyDetails: [], bruto: 0, potongan: 0, net: 0 };
+
+    entries.forEach(e => {
+      res.totalCup += (e.total || 0);
+      res.totalNonSks += (e.nonSks || 0);
+      res.komisiCup += ((e.total || 0) * (config.komisiDasarPerCup || 0));
+      
+      const harianTier = [...(config.kehadiranTiers || [])]
+        .sort((a,b) => b.min - a.min)
+        .find(t => e.nonSks >= t.min);
+      if (harianTier) res.bonusHarian += harianTier.bonus;
+
+      res.kasbon += (e.kasbon || 0);
+      res.minus += (e.minus || 0);
+      res.expired += (e.expired || 0);
+
+      const wId = PayrollEngine.getWeekId(e.date);
+      res.weeklyCups[wId] = (res.weeklyCups[wId] || 0) + (e.total || 0);
+    });
+
+    const weeklyDetails = Object.entries(res.weeklyCups).map(([date, total]) => {
+      const tier = [...(config.mingguanTiers || [])]
+        .sort((a,b) => b.min - a.min)
+        .find(t => total >= t.min);
+      const bonus = tier ? tier.bonus : 0;
+      res.bonusMingguan += bonus;
+      return { date, total, bonus };
+    });
+
+    const bruto = res.komisiCup + res.bonusHarian + res.bonusMingguan;
+    const potongan = res.kasbon + res.minus + res.expired;
+    return { ...res, weeklyDetails, bruto, potongan, net: bruto - potongan };
+  }
+};
+
+/* ================================================================
+  3. STATE & DATA CONTEXT
+  ================================================================
+*/
+const AppContext = createContext();
+
+export const AppProvider = ({ children }) => {
+  const [state, setState] = useState({
+    user: null,
+    role: 'staff',
+    branch: null,
+    isOnline: navigator.onLine,
+    loading: true,
+    msg: null
+  });
+
+  const notify = useCallback((text, type = 'success') => {
+    setState(prev => ({ ...prev, msg: { text, type } }));
+    setTimeout(() => setState(prev => ({ ...prev, msg: null })), 3000);
+  }, []);
+
+  useEffect(() => {
+    const handleStatus = () => setState(p => ({ ...p, isOnline: navigator.onLine }));
+    window.addEventListener('online', handleStatus);
+    window.addEventListener('offline', handleStatus);
+
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        notify("Auth Error: Cek koneksi", "error");
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setState(p => ({ 
+        ...p, 
+        user: u, 
+        role: typeof __initial_auth_token !== 'undefined' ? 'owner' : 'staff',
+        loading: false 
+      }));
+    });
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('online', handleStatus);
+      window.removeEventListener('offline', handleStatus);
+    };
+  }, [notify]);
+
+  return (
+    <AppContext.Provider value={{ ...state, setState, notify }}>
+      {children}
+    </AppContext.Provider>
+  );
+};
+
+/* ================================================================
+  4. MAIN APP LOGIC
+  ================================================================
+*/
+
+const SerasaApp = () => {
+  const { user, role, branch, isOnline, loading, msg, setState, notify } = useContext(AppContext);
+  const [activeTab, setActiveTab] = useState('input');
+  const [selectedBarista, setSelectedBarista] = useState('');
+  const [viewDate, setViewDate] = useState(new Date());
+  const [showSettings, setShowSettings] = useState(false);
+  const [newBaristaName, setNewBaristaName] = useState('');
+  
+  const [isFetching, setIsFetching] = useState(false);
+  const [baristas, setBaristas] = useState({});
+  const [entries, setEntries] = useState([]);
+
+  // Fetch Branch Config
+  useEffect(() => {
+    if (!user || !branch) return;
+    const branchRef = doc(db, 'artifacts', appId, 'public', 'data', 'branches', branch);
+    return onSnapshot(branchRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data().drivers || {};
+        setBaristas(data);
+        if (!selectedBarista && Object.keys(data).length > 0) {
+          setSelectedBarista(Object.keys(data)[0]);
+        }
+      }
+    });
+  }, [user, branch]);
+
+  // Server-side Query Filtering
+  useEffect(() => {
+    if (!user || !branch || !selectedBarista) {
+        setEntries([]);
+        return;
+    }
+
+    setIsFetching(true);
+    const startOfMonth = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1).toISOString().split('T')[0];
+    const endOfMonth = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).toISOString().split('T')[0];
+
+    const entriesRef = collection(db, 'artifacts', appId, 'public', 'data', 'branches', branch, 'baristas', selectedBarista, 'entries');
+    
+    const q = query(
+      entriesRef, 
+      where('date', '>=', startOfMonth),
+      where('date', '<=', endOfMonth)
+    );
+
+    const unsubscribe = onSnapshot(q, (snap) => {
+      setEntries(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setIsFetching(false);
+    }, (err) => {
+      notify("Gagal memuat data rekap", "error");
+      setIsFetching(false);
+    });
+
+    return () => unsubscribe();
+  }, [user, branch, selectedBarista, viewDate, notify]);
+
+  const stats = useMemo(() => {
+    const config = baristas[selectedBarista] || null;
+    return PayrollEngine.calculate(entries, config);
+  }, [entries, baristas, selectedBarista]);
+
+  const updateBaristaConfig = (key, value, tierIndex = null, field = null) => {
+    setBaristas(prev => {
+      const currentBarista = prev[selectedBarista] || {};
+      let nextBarista = { ...currentBarista };
+
+      if (tierIndex !== null && field) {
+        const tierType = key; 
+        const nextTiers = [...(nextBarista[tierType] || [])];
+        nextTiers[tierIndex] = { ...nextTiers[tierIndex], [field]: value };
+        nextBarista[tierType] = nextTiers;
+      } else {
+        nextBarista[key] = value;
+      }
+
+      return { ...prev, [selectedBarista]: nextBarista };
+    });
+  };
+
+  const handleAddBarista = () => {
+    if (!newBaristaName.trim()) return notify("Nama tidak boleh kosong", "error");
+    if (baristas[newBaristaName]) return notify("Barista sudah ada", "error");
+
+    const newList = {
+        ...baristas,
+        [newBaristaName]: {
+            komisiDasarPerCup: 0,
+            kehadiranTiers: [],
+            mingguanTiers: []
+        }
+    };
+    setBaristas(newList);
+    setSelectedBarista(newBaristaName);
+    setNewBaristaName('');
+    notify(`Barista ${newBaristaName} ditambahkan`);
+  };
+
+  const handleRemoveBarista = (name) => {
+    if (Object.keys(baristas).length <= 1) return notify("Minimal harus ada 1 barista", "error");
+    const { [name]: removed, ...rest } = baristas;
+    setBaristas(rest);
+    setSelectedBarista(Object.keys(rest)[0]);
+    notify(`Barista ${name} dihapus dari daftar`);
+  };
+
+  const handleSaveEntry = async (e) => {
+    e.preventDefault();
+    if (!selectedBarista) return notify("Pilih barista terlebih dahulu", "error");
+    if (!isOnline) return notify("Sedang offline", "error");
+    
+    const fd = new FormData(e.currentTarget);
+    const date = fd.get('date');
+    
+    if (role === 'staff' && date !== new Date().toISOString().split('T')[0]) {
+      return notify("Gagal: Staff hanya boleh input hari ini", "error");
+    }
+
+    try {
+      const entryData = {
+        date,
+        total: parseInt(fd.get('total')) || 0,
+        nonSks: parseInt(fd.get('nonSks')) || 0,
+        kasbon: parseInt(fd.get('kasbon')) || 0,
+        minus: parseInt(fd.get('minus')) || 0,
+        expired: parseInt(fd.get('expired')) || 0,
+        updatedAt: serverTimestamp()
+      };
+
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'branches', branch, 'baristas', selectedBarista, 'entries', date);
+      await setDoc(docRef, entryData);
+      notify("Data shift berhasil disimpan");
+      e.target.reset();
+    } catch (err) {
+      notify("Error menyimpan data", "error");
+    }
+  };
+
+  if (loading) return (
+    <div className="h-screen flex items-center justify-center bg-slate-50">
+      <Loader2 className="w-12 h-12 text-blue-600 animate-spin" />
+    </div>
+  );
+
+  if (!branch) return (
+    <div className="h-screen flex items-center justify-center bg-[#FDFDFD] p-6">
+       <div className="w-full max-w-md text-center">
+          <div className="w-24 h-24 bg-blue-600 rounded-[2.5rem] flex items-center justify-center text-white mx-auto shadow-2xl mb-8 rotate-6">
+            <Coffee className="w-12 h-12" />
+          </div>
+          <h1 className="text-4xl font-black tracking-tighter mb-2">SERASA KOPI <span className="text-blue-600">PRO</span></h1>
+          <p className="text-slate-400 font-bold text-xs uppercase tracking-[0.3em] mb-12">Select Work Branch</p>
+          <div className="grid gap-4">
+             {['Edwita', 'Edgar'].map(b => (
+               <button 
+                key={b} 
+                onClick={() => setState(p => ({ ...p, branch: b }))}
+                className="p-8 bg-white border-2 border-slate-100 rounded-[2.5rem] font-black text-xl hover:border-blue-600 hover:shadow-xl transition-all"
+               >
+                 {b}
+               </button>
+             ))}
+          </div>
+       </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-[#FDFDFD] pb-32">
+      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-100 px-6 py-4">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-10 h-10 bg-slate-900 rounded-2xl flex items-center justify-center text-white"><Coffee className="w-5 h-5" /></div>
+            <div>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{branch}</p>
+              <h2 className="text-sm font-black flex items-center gap-2 uppercase tracking-tight">
+                {role} Mode {!isOnline && <WifiOff className="w-3 h-3 text-rose-500" />}
+              </h2>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {role === 'owner' && (
+              <button onClick={() => setShowSettings(true)} className="p-3 bg-slate-100 rounded-2xl hover:bg-slate-200 transition-all"><Settings className="w-5 h-5"/></button>
+            )}
+            <button onClick={() => setState(p => ({ ...p, branch: null }))} className="p-3 bg-rose-50 text-rose-500 rounded-2xl hover:bg-rose-100 transition-all"><LogOut className="w-5 h-5"/></button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto p-6 md:p-12">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mb-12">
+          <div className="lg:col-span-8 bg-blue-600 rounded-[3.5rem] p-10 md:p-14 text-white shadow-2xl relative overflow-hidden">
+             <div className="absolute -right-20 -bottom-20 opacity-10"><BarChart3 className="w-80 h-80" /></div>
+             <div className="relative z-10">
+                <p className="text-[10px] font-black uppercase tracking-[0.4em] opacity-60 mb-3">Estimasi Gaji Bersih</p>
+                {isFetching ? <div className="h-16 w-64 bg-white/20 rounded-2xl animate-pulse mb-10" /> : <h1 className="text-5xl md:text-7xl font-black tracking-tighter mb-10">Rp {stats.net.toLocaleString()}</h1>}
+                
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="bg-white/10 backdrop-blur-md rounded-3xl p-4 border border-white/10">
+                    <p className="text-[8px] font-black uppercase opacity-60 mb-1">Total Cup</p>
+                    <p className="text-lg font-black">{isFetching ? '...' : stats.totalCup}</p>
+                  </div>
+                  <div className="bg-white/10 backdrop-blur-md rounded-3xl p-4 border border-white/10">
+                    <p className="text-[8px] font-black uppercase opacity-60 mb-1">Mingguan</p>
+                    <p className="text-lg font-black">+{isFetching ? '...' : stats.bonusMingguan.toLocaleString()}</p>
+                  </div>
+                  <div className="bg-white/10 backdrop-blur-md rounded-3xl p-4 border border-white/10">
+                    <p className="text-[8px] font-black uppercase opacity-60 mb-1">Harian</p>
+                    <p className="text-lg font-black">+{isFetching ? '...' : stats.bonusHarian.toLocaleString()}</p>
+                  </div>
+                  <div className="bg-white/10 backdrop-blur-md rounded-3xl p-4 border border-white/10">
+                    <p className="text-[8px] font-black uppercase opacity-60 mb-1">Potongan</p>
+                    <p className="text-lg font-black">-{isFetching ? '...' : stats.potongan.toLocaleString()}</p>
+                  </div>
+                </div>
+             </div>
+          </div>
+
+          <div className="lg:col-span-4 flex flex-col gap-6">
+             <div className="bg-white p-8 rounded-[3rem] border border-slate-100 shadow-xl">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Pilih Barista</p>
+                <div className="relative">
+                  <select 
+                    value={selectedBarista} 
+                    onChange={e => setSelectedBarista(e.target.value)}
+                    className="w-full appearance-none bg-slate-50 px-8 py-5 rounded-[1.8rem] font-black text-xl outline-none"
+                  >
+                    {Object.keys(baristas).length > 0 ? Object.keys(baristas).map(name => <option key={name} value={name}>{name}</option>) : <option>Belum ada barista</option>}
+                  </select>
+                  <ChevronDown className="absolute right-6 top-1/2 -translate-y-1/2 w-6 h-6 text-slate-300" />
+                </div>
+             </div>
+
+             <div className="bg-slate-900 p-8 rounded-[3rem] text-white flex items-center justify-between">
+                <div>
+                   <p className="text-[9px] font-black uppercase opacity-40 mb-1">Periode</p>
+                   <p className="text-xl font-black">{viewDate.toLocaleDateString('id-ID', {month: 'long', year: 'numeric'})}</p>
+                </div>
+                <div className="flex gap-2">
+                   <button onClick={() => setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth()-1))} className="p-3 bg-white/10 rounded-2xl hover:bg-white/20"><ChevronLeft className="w-5 h-5"/></button>
+                   <button onClick={() => setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth()+1))} className="p-3 bg-white/10 rounded-2xl hover:bg-white/20"><ChevronRight className="w-5 h-5"/></button>
+                </div>
+             </div>
+          </div>
+        </div>
+
+        <div className="flex bg-slate-100 p-1.5 rounded-[2rem] w-fit mx-auto mb-12 shadow-inner">
+           {['input', 'rekap', 'gaji'].map(t => (
+             <button key={t} onClick={() => setActiveTab(t)} className={`px-10 py-3.5 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>
+               {t}
+             </button>
+           ))}
+        </div>
+
+        <div className="animate-in slide-in-from-bottom-5">
+           {activeTab === 'input' && (
+             <div className="max-w-xl mx-auto">
+                <form onSubmit={handleSaveEntry} className="bg-white p-10 md:p-14 rounded-[4rem] border border-slate-100 shadow-2xl space-y-10">
+                   <div className="space-y-3">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Tanggal Kerja</label>
+                      <input name="date" type="date" required defaultValue={new Date().toISOString().split('T')[0]} className="w-full p-6 bg-slate-50 rounded-[2rem] font-black text-xl outline-none focus:ring-4 ring-blue-50 transition-all" />
+                   </div>
+
+                   <div className="grid grid-cols-2 gap-6">
+                      <div className="space-y-3">
+                         <label className="text-[10px] font-black text-blue-600 uppercase tracking-widest ml-4">Total Cup</label>
+                         <input name="total" type="number" required placeholder="0" className="w-full p-8 bg-blue-50 text-blue-700 rounded-[2.5rem] font-black text-4xl outline-none focus:ring-4 ring-blue-100" />
+                      </div>
+                      <div className="space-y-3">
+                         <label className="text-[10px] font-black text-emerald-600 uppercase tracking-widest ml-4">Non-SKS</label>
+                         <input name="nonSks" type="number" required placeholder="0" className="w-full p-8 bg-emerald-50 text-emerald-700 rounded-[2.5rem] font-black text-4xl outline-none focus:ring-4 ring-emerald-100" />
+                      </div>
+                   </div>
+
+                   <div className="grid grid-cols-3 gap-4">
+                      {['Kasbon', 'Minus', 'Expired'].map(f => (
+                        <div key={f} className="space-y-2">
+                           <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-center block">{f}</label>
+                           <input name={f.toLowerCase()} type="number" placeholder="0" className="w-full p-5 bg-slate-50 rounded-[1.8rem] font-black text-center text-slate-800 outline-none" />
+                        </div>
+                      ))}
+                   </div>
+
+                   <button type="submit" disabled={!isOnline || !selectedBarista} className="w-full py-8 bg-slate-900 text-white rounded-[2.5rem] font-black text-sm uppercase tracking-[0.4em] hover:bg-blue-600 disabled:opacity-50 transition-all shadow-xl">
+                      Simpan Shift
+                   </button>
+                </form>
+             </div>
+           )}
+
+           {activeTab === 'rekap' && (
+             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="bg-white p-8 rounded-[3rem] border border-slate-100 shadow-xl h-fit">
+                   <h4 className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-8 flex items-center gap-2">
+                     <Zap className="w-4 h-4 text-blue-500" /> Milestone Mingguan
+                   </h4>
+                   <div className="space-y-4">
+                      {isFetching ? [1,2,3].map(i => <div key={i} className="h-20 w-full bg-slate-100 rounded-3xl animate-pulse" />) : stats.weeklyDetails.map(w => (
+                         <div key={w.date} className="flex justify-between items-center p-5 bg-slate-50 rounded-3xl border border-slate-100">
+                            <div>
+                               <p className="text-[9px] font-black text-slate-400 uppercase">Senin, {new Date(w.date).getDate()}</p>
+                               <p className="font-black text-lg">{w.total} Cup</p>
+                            </div>
+                            <div className="text-right">
+                               <p className="text-[9px] font-black text-blue-400 uppercase">Bonus</p>
+                               <p className="font-black text-emerald-600">Rp {w.bonus.toLocaleString()}</p>
+                            </div>
+                         </div>
+                      ))}
+                   </div>
+                </div>
+
+                <div className="lg:col-span-2 bg-white rounded-[3.5rem] border border-slate-100 shadow-xl overflow-hidden">
+                   <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead className="bg-slate-50 border-b border-slate-100">
+                           <tr>
+                             <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Tanggal</th>
+                             <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Cup</th>
+                             <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Potongan</th>
+                           </tr>
+                        </thead>
+                        <tbody>
+                           {isFetching ? [1,2,3,4,5].map(i => (
+                             <tr key={i}><td colSpan="3" className="px-8 py-4"><div className="h-10 w-full bg-slate-50 rounded-lg animate-pulse" /></td></tr>
+                           )) : entries.sort((a,b) => b.date.localeCompare(a.date)).map(e => (
+                             <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                               <td className="px-8 py-6 font-black text-slate-800">{new Date(e.date).toLocaleDateString('id-ID', {weekday: 'short', day: 'numeric', month: 'short'})}</td>
+                               <td className="px-8 py-6">
+                                  <div className="flex gap-2">
+                                     <span className="px-3 py-1 bg-blue-50 text-blue-600 rounded-lg font-black text-[10px]">{e.total} Total</span>
+                                     <span className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg font-black text-[10px]">{e.nonSks} Non-Sks</span>
+                                  </div>
+                               </td>
+                               <td className="px-8 py-6 text-right font-black text-rose-500">Rp {(e.kasbon + e.minus + e.expired).toLocaleString()}</td>
+                             </tr>
+                           ))}
+                        </tbody>
+                      </table>
+                   </div>
+                </div>
+             </div>
+           )}
+
+           {activeTab === 'gaji' && (
+             <div className="max-w-4xl mx-auto">
+                <div className="bg-white rounded-[4rem] border border-slate-100 shadow-2xl overflow-hidden">
+                   <div className="bg-slate-900 p-12 text-white flex flex-col md:flex-row justify-between items-start md:items-end gap-8">
+                      <div>
+                         <p className="text-[10px] font-black uppercase tracking-[0.5em] text-blue-400 mb-2">E-Slip Gaji</p>
+                         <h3 className="text-5xl font-black tracking-tighter">{selectedBarista || 'Pilih Barista'}</h3>
+                      </div>
+                      <div className="text-right">
+                         <p className="text-[10px] font-black uppercase tracking-[0.5em] opacity-40 mb-1">Take Home Pay</p>
+                         <p className="text-6xl font-black text-emerald-400">Rp {stats.net.toLocaleString()}</p>
+                      </div>
+                   </div>
+
+                   <div className="p-10 md:p-16 grid grid-cols-1 md:grid-cols-2 gap-16">
+                      <section className="space-y-6">
+                         <h4 className="text-[11px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                            <TrendingUp className="w-4 h-4 text-emerald-500"/> Pendapatan
+                         </h4>
+                         <div className="space-y-3">
+                            {[
+                              {l: 'Komisi Cup', v: stats.komisiCup, t: null},
+                              {l: 'Bonus Harian', v: stats.bonusHarian, t: 'emerald'},
+                              {l: 'Bonus Mingguan', v: stats.bonusMingguan, t: 'blue'}
+                            ].map((item, idx) => (
+                              <div key={idx} className={`flex justify-between items-center p-6 rounded-3xl ${item.t ? THEME_MAP[item.t].bg : 'bg-slate-50'}`}>
+                                 <span className="text-[10px] font-bold text-slate-500 uppercase">{item.l}</span>
+                                 <span className={`font-black ${item.t ? THEME_MAP[item.t].text : ''}`}>Rp {item.v.toLocaleString()}</span>
+                              </div>
+                            ))}
+                         </div>
+                      </section>
+
+                      <section className="space-y-6">
+                         <h4 className="text-[11px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                            <Info className="w-4 h-4 text-rose-500"/> Potongan
+                         </h4>
+                         <div className="space-y-3">
+                            {[
+                                {l: 'Minus', v: stats.minus},
+                                {l: 'Expired', v: stats.expired},
+                                {l: 'Kasbon', v: stats.kasbon}
+                            ].map((item, idx) => (
+                               <div key={idx} className="flex justify-between items-center p-6 bg-rose-50/50 rounded-3xl border border-rose-100">
+                                 <span className="text-[10px] font-bold text-rose-400 uppercase">{item.l}</span>
+                                 <span className="font-black text-rose-600">Rp {item.v.toLocaleString()}</span>
+                               </div>
+                            ))}
+                         </div>
+                      </section>
+                   </div>
+                </div>
+             </div>
+           )}
+        </div>
+      </main>
+
+      {showSettings && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-md flex items-end md:items-center justify-center">
+           <div className="w-full max-w-4xl bg-white rounded-t-[4rem] md:rounded-[4rem] shadow-2xl h-[90vh] md:h-auto md:max-h-[90vh] overflow-hidden flex flex-col animate-in slide-in-from-bottom-20">
+              <div className="p-10 border-b border-slate-100 flex justify-between items-center shrink-0">
+                 <h2 className="text-3xl font-black tracking-tighter flex items-center gap-4">
+                   <Settings className="w-8 h-8 text-blue-600" /> Control Console
+                 </h2>
+                 <button onClick={() => setShowSettings(false)} className="p-4 hover:bg-slate-100 rounded-2xl"><X className="w-7 h-7"/></button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-10 space-y-12 pb-32">
+                 {/* MANAJEMEN BARISTA */}
+                 <section className="p-10 bg-slate-900 rounded-[3rem] text-white">
+                    <h4 className="text-[11px] font-black opacity-40 uppercase tracking-[0.3em] mb-8">Manajemen Barista</h4>
+                    <div className="flex gap-4 mb-8">
+                       <input 
+                        type="text" 
+                        placeholder="Nama Barista Baru..." 
+                        value={newBaristaName}
+                        onChange={e => setNewBaristaName(e.target.value)}
+                        className="flex-1 bg-white/10 p-5 rounded-2xl font-black outline-none border border-white/10 focus:border-blue-500"
+                       />
+                       <button onClick={handleAddBarista} className="p-5 bg-blue-600 rounded-2xl hover:bg-blue-500 transition-all"><UserPlus className="w-6 h-6"/></button>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                       {Object.keys(baristas).map(name => (
+                          <div key={name} className={`flex items-center justify-between p-5 rounded-2xl border transition-all ${selectedBarista === name ? 'bg-blue-600 border-blue-400' : 'bg-white/5 border-white/10 hover:bg-white/10'}`}>
+                             <button onClick={() => setSelectedBarista(name)} className="flex-1 text-left font-black">{name}</button>
+                             <button onClick={() => handleRemoveBarista(name)} className="p-2 text-rose-400 hover:text-rose-300"><Trash2 className="w-4 h-4"/></button>
+                          </div>
+                       ))}
+                    </div>
+                 </section>
+
+                 {selectedBarista && (
+                    <div className="space-y-12 animate-in slide-in-from-top-5">
+                        <section className="p-10 bg-slate-50 rounded-[3rem] border border-slate-100">
+                            <h4 className="text-[11px] font-black text-slate-400 uppercase tracking-[0.3em] mb-8">1. Komisi Dasar ({selectedBarista})</h4>
+                            <div className="relative">
+                            <span className="absolute left-6 top-1/2 -translate-y-1/2 font-black text-slate-300">Rp</span>
+                            <input 
+                                type="number" 
+                                value={baristas[selectedBarista]?.komisiDasarPerCup || 0}
+                                onChange={e => updateBaristaConfig('komisiDasarPerCup', parseInt(e.target.value) || 0)}
+                                className="w-full pl-16 pr-8 py-6 bg-white rounded-2xl border border-slate-200 font-black text-2xl outline-none focus:border-blue-500 transition-all" 
+                            />
+                            </div>
+                        </section>
+
+                        <section className="p-10 bg-emerald-50/30 rounded-[3rem] border border-emerald-100">
+                            <div className="flex justify-between items-center mb-8">
+                            <h4 className="text-[11px] font-black text-emerald-600 uppercase tracking-[0.3em]">2. Bonus Harian (Non-SKS)</h4>
+                            <button onClick={() => {
+                                const current = baristas[selectedBarista]?.kehadiranTiers || [];
+                                updateBaristaConfig('kehadiranTiers', [...current, { min: 0, bonus: 0 }]);
+                            }} className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-[10px] font-black uppercase">+ Add Tier</button>
+                            </div>
+                            <div className="space-y-4">
+                            {baristas[selectedBarista]?.kehadiranTiers?.map((t, i) => (
+                                <div key={i} className="flex gap-4 items-center">
+                                    <div className="flex-1 grid grid-cols-2 gap-4 bg-white p-3 rounded-2xl border border-emerald-100">
+                                    <div className="p-2 border-r border-slate-100">
+                                        <p className="text-[8px] font-black text-slate-300 uppercase mb-1">Min. Non-Sks</p>
+                                        <input type="number" value={t.min} onChange={e => updateBaristaConfig('kehadiranTiers', parseInt(e.target.value), i, 'min')} className="w-full font-black outline-none" />
+                                    </div>
+                                    <div className="p-2">
+                                        <p className="text-[8px] font-black text-slate-300 uppercase mb-1">Bonus Rp</p>
+                                        <input type="number" value={t.bonus} onChange={e => updateBaristaConfig('kehadiranTiers', parseInt(e.target.value), i, 'bonus')} className="w-full font-black outline-none" />
+                                    </div>
+                                    </div>
+                                    <button onClick={() => {
+                                    const next = baristas[selectedBarista].kehadiranTiers.filter((_, idx) => idx !== i);
+                                    updateBaristaConfig('kehadiranTiers', next);
+                                    }} className="p-4 text-rose-400 hover:bg-rose-50 rounded-2xl"><Trash2 className="w-5 h-5"/></button>
+                                </div>
+                            ))}
+                            </div>
+                        </section>
+
+                        <section className="p-10 bg-blue-50/30 rounded-[3rem] border border-blue-100">
+                            <div className="flex justify-between items-center mb-8">
+                            <h4 className="text-[11px] font-black text-blue-600 uppercase tracking-[0.3em]">3. Bonus Mingguan (Total Cup)</h4>
+                            <button onClick={() => {
+                                const current = baristas[selectedBarista]?.mingguanTiers || [];
+                                updateBaristaConfig('mingguanTiers', [...current, { min: 0, bonus: 0 }]);
+                            }} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase">+ Add Tier</button>
+                            </div>
+                            <div className="space-y-4">
+                            {baristas[selectedBarista]?.mingguanTiers?.map((t, i) => (
+                                <div key={i} className="flex gap-4 items-center">
+                                    <div className="flex-1 grid grid-cols-2 gap-4 bg-white p-3 rounded-2xl border border-blue-100">
+                                    <div className="p-2 border-r border-slate-100">
+                                        <p className="text-[8px] font-black text-slate-300 uppercase mb-1">Min. Cup/Week</p>
+                                        <input type="number" value={t.min} onChange={e => updateBaristaConfig('mingguanTiers', parseInt(e.target.value), i, 'min')} className="w-full font-black outline-none" />
+                                    </div>
+                                    <div className="p-2">
+                                        <p className="text-[8px] font-black text-slate-300 uppercase mb-1">Bonus Rp</p>
+                                        <input type="number" value={t.bonus} onChange={e => updateBaristaConfig('mingguanTiers', parseInt(e.target.value), i, 'bonus')} className="w-full font-black outline-none" />
+                                    </div>
+                                    </div>
+                                    <button onClick={() => {
+                                    const next = baristas[selectedBarista].mingguanTiers.filter((_, idx) => idx !== i);
+                                    updateBaristaConfig('mingguanTiers', next);
+                                    }} className="p-4 text-rose-400 hover:bg-rose-50 rounded-2xl"><Trash2 className="w-5 h-5"/></button>
+                                </div>
+                            ))}
+                            </div>
+                        </section>
+                    </div>
+                 )}
+
+                 <button 
+                  onClick={async () => {
+                    try {
+                      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'branches', branch), { drivers: baristas }, { merge: true });
+                      notify("Konfigurasi tersimpan permanen");
+                      setShowSettings(false);
+                    } catch (e) {
+                      notify("Gagal menyimpan ke server", "error");
+                    }
+                  }}
+                  className="w-full py-8 bg-slate-900 text-white rounded-[2.5rem] font-black text-sm uppercase tracking-[0.4em] shadow-2xl hover:bg-blue-600 flex items-center justify-center gap-4"
+                 >
+                   <Save className="w-6 h-6" /> Save Entire Configuration
+                 </button>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {msg && (
+        <div className={`fixed bottom-10 left-1/2 -translate-x-1/2 z-[200] px-10 py-5 rounded-[2rem] shadow-2xl flex items-center gap-4 text-white font-black animate-in slide-in-from-bottom-10 ${msg.type === 'success' ? 'bg-slate-900' : 'bg-rose-600'}`}>
+          {msg.type === 'success' ? <CheckCircle className="w-5 h-5 text-emerald-400" /> : <AlertCircle className="w-5 h-5" />}
+          <span className="text-[10px] uppercase tracking-widest">{msg.text}</span>
+        </div>
+      )}
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;700;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #FDFDFD; margin: 0; overflow-x: hidden; }
+        .animate-in { animation: animateIn 0.5s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes animateIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        select { background-image: none !important; }
+      `}</style>
+    </div>
+  );
+};
+
+const App = () => (
+  <AppProvider>
+    <SerasaApp />
+  </AppProvider>
+);
+
+export default App;
