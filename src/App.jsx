@@ -371,13 +371,12 @@ const SerasaApp = () => {
     }
   };
 const handleDownloadSlip = async () => {
-  const element = document.getElementById("slipGaji");
-
-  if (!element) return notify("Slip tidak ditemukan", "error");
+  const element = document.body;   // 🔥 seluruh halaman
 
   const canvas = await html2canvas(element, {
     scale: 2,
-    backgroundColor: "#ffffff"
+    backgroundColor: "#ffffff",
+    useCORS: true
   });
 
   const image = canvas.toDataURL("image/png");
@@ -387,7 +386,7 @@ const handleDownloadSlip = async () => {
   link.download = `slip-gaji-${selectedBarista}.png`;
   link.click();
 
-  notify("Slip berhasil diunduh sebagai gambar");
+  notify("Tampilan penuh berhasil diunduh");
 };
   const handleShareGaji = () => {
     if (!selectedBarista || stats.net === 0) return notify("Data kosong", "error");
